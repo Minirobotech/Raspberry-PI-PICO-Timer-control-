@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pico Timer Control Panel</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; background-color: #f4f4f9; }
+        .container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); width: 100%; max-width: 400px; text-align: center; }
+        h1 { color: #333; }
+        #status { margin-bottom: 20px; padding: 10px; border-radius: 5px; font-weight: bold; background-color: #ffe0b2; }
+        #timerDisplay { font-size: 3em; color: #007bff; margin-bottom: 10px; }
+        #currentState { font-size: 1.2em; color: #555; margin-bottom: 20px; }
+        button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; transition: background-color 0.3s; }
+        #connectButton { background-color: #28a745; color: white; }
+        #connectButton:hover { background-color: #218838; }
+        .control-buttons button { background-color: #007bff; color: white; }
+        .control-buttons button:hover { background-color: #0056b3; }
+        #setMinutes { width: 80px; padding: 8px; margin: 10px; border-radius: 5px; border: 1px solid #ccc; text-align: center; }
+        .log { margin-top: 20px; font-size: 0.8em; color: #777; text-align: left; max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Pico Timer Control</h1>
+        <div id="status">Disconnesso</div>
+
+        <button id="connectButton">Connetti al Pico Timer</button>
+
+        <hr style="margin: 20px 0;">
+
+        <h2>Stato Timer</h2>
+        <div id="timerDisplay">00:00</div>
+        <div id="currentState">Impostazione</div>
+        
+        <div class="control-panel">
+            <input type="number" id="setMinutes" min="0" max="90" value="5" placeholder="Minuti">
+            <button id="setButton">SET Minuti</button>
+            <div class="control-buttons" style="margin-top: 10px;">
+                <button id="startButton">START</button>
+                <button id="resetButton" style="background-color: #dc3545;">RESET/STOP</button>
+            </div>
+        </div>
+        
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        // --- UUID 16-bit espansi a 128-bit (necessari per Web Bluetooth) ---
+        const SERVICE_UUID = '0000aaaa-0000-1000-8000-00805f9b34fb';
+        const COMMAND_CHAR_UUID = '0000aaab-0000-1000-8000-00805f9b34fb';
+        const STATUS_CHAR_UUID = '0000aaac-0000-1000-8000-00805f9b34fb';
+
+        // --- Variabili di Stato Globali ---
+        let bluetoothDevice;
+        let commandCharacteristic;
+        let statusCharacteristic;
+
+        // --- Elementi DOM ---
+        const statusDiv = document.getElementById('status');
+        const connectButton = document.getElementById('connectButton');
+        const timerDisplay = document.getElementById('timerDisplay');
+        const currentStateDiv = document.getElementById('currentState');
+        const setMinutesInput = document.getElementById('setMinutes');
+        const logDiv = document.getElementById('log');
+
+        // Funzione di logging per debug
+        function log(message) {
+            console.log(message);
+            logDiv.innerHTML += `<div>${new Date().toLocaleTimeString()} - ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // --- Funzione Principale di Connessione ---
+        async function connect() {
+            log('Tentativo di connessione...');
+            statusDiv.textContent = 'Connessione in corso...';
+            statusDiv.style.backgroundColor = '#ffc107';
+
+            try {
+                // 1. Richiesta del dispositivo
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'Pico Timer' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+                
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                // 2. Connessione al server GATT
+                log('Connesso al dispositivo. Tentativo di connettere al server GATT...');
+                const server = await bluetoothDevice.gatt.connect();
+
+                // 3. Ottenere il Servizio
+                log('Server GATT connesso. Ottenere il servizio...');
+                const service = await server.getPrimaryService(SERVICE_UUID);
+
+                // 4. Ottenere le Caratteristiche
+                log('Servizio ottenuto. Ottenere le caratteristiche...');
+                commandCharacteristic = await service.getCharacteristic(COMMAND_CHAR_UUID);
+                statusCharacteristic = await service.getCharacteristic(STATUS_CHAR_UUID);
+                
+                // 5. Abilitare le Notifiche sulla caratteristica di Stato
+                await statusCharacteristic.startNotifications();
+                statusCharacteristic.addEventListener('characteristicvaluechanged', handleStatusChange);
+
+                log('Connessione e Notifiche stabilite con successo!');
+                statusDiv.textContent = 'Connesso';
+                statusDiv.style.backgroundColor = '#28a745';
+                connectButton.textContent = 'Disconnetti';
+
+            } catch (error) {
+                log('ERRORE DI CONNESSIONE: ' + error.message);
+                statusDiv.textContent = 'Connessione Fallita';
+                statusDiv.style.backgroundColor = '#dc3545';
+            }
+        }
+
+        // --- Gestione Disconnessione ---
+        function onDisconnected(event) {
+            log('Dispositivo Pico disconnesso.');
+            statusDiv.textContent = 'Disconnesso';
+            statusDiv.style.backgroundColor = '#ffe0b2';
+            connectButton.textContent = 'Connetti al Pico Timer';
+        }
+
+        // --- Gestione Dati in Arrivo (STATUS_CHAR) ---
+        function handleStatusChange(event) {
+            const value = event.target.value; // DataView
+            
+            if (value.byteLength < 3) {
+                 log('Dati di stato incompleti.');
+                 return;
+            }
+
+            // Decodifica il pacchetto binario: <BH (StatoID: 1 Byte, Secondi: 2 Byte Little-Endian)
+            const statoID = value.getUint8(0); 
+            // 'true' come secondo argomento indica il formato Little-Endian
+            const secondiRimanenti = value.getUint16(1, true); 
+
+            let statoTesto = 'Sconosciuto';
+            let minuti = Math.floor(secondiRimanenti / 60);
+            let secondi = secondiRimanenti % 60;
+            const tempoFormattato = `${String(minuti).padStart(2, '0')}:${String(secondi).padStart(2, '0')}`;
+
+            if (statoID === 0) {
+                statoTesto = 'Impostazione';
+            } else if (statoID === 1) {
+                statoTesto = 'Conto alla Rovescia';
+            } else if (statoID === 2) {
+                statoTesto = 'Scaduto (FINISHED)';
+            }
+            
+            // Aggiorna l'UI
+            currentStateDiv.textContent = statoTesto;
+            timerDisplay.textContent = tempoFormattato;
+            
+            log(`Stato ricevuto: ID=${statoID} (${statoTesto}), Tempo: ${tempoFormattato}`);
+        }
+
+        // --- Funzione per Inviare Comandi ---
+        async function sendCommand(command) {
+            if (!commandCharacteristic) {
+                log('Errore: Caratteristica di comando non disponibile. Riconnettersi.');
+                return;
+            }
+            try {
+                const commandBytes = new TextEncoder().encode(command);
+                await commandCharacteristic.writeValue(commandBytes);
+                log(`Comando inviato: ${command}`);
+            } catch (error) {
+                log(`ERRORE nell'invio del comando ${command}: ${error.message}`);
+            }
+        }
+
+        // --- Listener per i Bottoni ---
+        connectButton.addEventListener('click', () => {
+            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+                bluetoothDevice.gatt.disconnect();
+            } else {
+                connect();
+            }
+        });
+
+        document.getElementById('startButton').addEventListener('click', () => {
+            sendCommand("START");
+        });
+
+        document.getElementById('resetButton').addEventListener('click', () => {
+            sendCommand("RESET");
+        });
+
+        document.getElementById('setButton').addEventListener('click', () => {
+            const minutes = parseInt(setMinutesInput.value);
+            if (!isNaN(minutes) && minutes >= 0 && minutes <= 90) {
+                sendCommand(`SET:${minutes}`);
+            } else {
+                log('Errore: Inserisci un valore valido tra 0 e 90.');
+            }
+        });
+    </script>
+</body>
+</html>

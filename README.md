@@ -1,0 +1,1 @@
+The project involves the use of a Raspberry PI PICO as a microcontroller programmed in PYTHON, an OLED display with SSD1306 chip and a rotary encoder with integrated switch. The time displayed on the OLED display can be changed or locked via a web page loaded on the Android phone
